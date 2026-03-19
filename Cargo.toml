@@ -1,0 +1,21 @@
+[package]
+name = "pyodide-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pyodide-desktop"
+path = "src/main.rs"
+
+[dependencies]
+wry        = "0.47"
+tao        = "0.33"
+tiny_http  = "0.12"   # 輕量內建 HTTP server，提供 pyodide/ 靜態檔案
+mime_guess = "2.0"    # 依副檔名自動推斷 Content-Type
+ctrlc      = "3.4"
+
+[profile.release]
+opt-level = 3
+strip     = true
+lto       = true
+codegen-units = 1
