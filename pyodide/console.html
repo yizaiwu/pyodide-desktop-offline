@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pyodide Console</title>
+  <script src="pyodide.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #1e1e2e;
+      --surface:  #2a2a3e;
+      --border:   #44475a;
+      --accent:   #bd93f9;
+      --green:    #50fa7b;
+      --yellow:   #f1fa8c;
+      --red:      #ff5555;
+      --cyan:     #8be9fd;
+      --text:     #f8f8f2;
+      --muted:    #6272a4;
+      --cell-bg:  #252535;
+      --out-bg:   #1a1a2e;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      overflow: hidden;
+    }
+
+    /* ── TOP BAR ───────────────────────────────────── */
+    #topbar {
+      display: flex; align-items: center; gap: 10px;
+      height: 46px; padding: 0 16px;
+      background: #3a5a3a;
+      border-bottom: 1px solid #2d4a2d;
+      flex-shrink: 0; user-select: none;
+    }
+    #topbar .logo { font-size: 20px; }
+    #topbar h1 { font-size: 15px; font-weight: 600; color: #e8f5e8; }
+    #topbar .credit { font-size: 11px; color: #8aba8a; margin-left: 4px; }
+    #topbar .sep { color: #4a6a4a; }
+    .spacer { flex: 1; }
+
+    .tb-btn {
+      display: flex; align-items: center; gap: 5px;
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: #e8f5e8; border-radius: 6px;
+      padding: 5px 12px; font-size: 12px; font-weight: 500;
+      cursor: pointer; transition: background 0.15s; white-space: nowrap;
+    }
+    .tb-btn:hover:not(:disabled) { background: rgba(255,255,255,0.18); }
+    .tb-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .tb-btn.primary { background: rgba(80,250,123,0.12); border-color: rgba(80,250,123,0.4); color: #50fa7b; }
+    .tb-btn.primary:hover:not(:disabled) { background: rgba(80,250,123,0.22); }
+    .tb-btn.danger  { color: var(--red); }
+
+    #status-badge {
+      font-size: 11px; padding: 3px 10px; border-radius: 10px;
+      background: var(--border); color: var(--muted); transition: all 0.3s; white-space: nowrap;
+    }
+    #status-badge.ready   { background: #1a3a2a; color: var(--green); }
+    #status-badge.loading { background: #3a2a10; color: var(--yellow); }
+    #status-badge.running { background: #2a1a3a; color: var(--accent); }
+    #status-badge.error   { background: #3a1a1a; color: var(--red); }
+
+    /* ── NOTEBOOK ──────────────────────────────────── */
+    #notebook-wrap {
+      height: calc(100vh - 46px);
+      overflow-y: auto; padding: 20px 0 100px;
+    }
+    #notebook-wrap::-webkit-scrollbar { width: 6px; }
+    #notebook-wrap::-webkit-scrollbar-track { background: transparent; }
+    #notebook-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /*
+     * 版面結構：
+     *   [notebook-wrap padding-left: 20px]
+     *     [notebook padding-left: 80px]   ← 留給 cell-counter (64px) + gap (16px)
+     *       [cell]
+     *         [cell-counter: absolute, left:-72px, width:64px]  右側對齊 cell 左邊
+     *         [cell-input]
+     *           [cell-lineno 40px] | [cell-editor-wrap flex:1]
+     *                                  [cell-editor padding-right:44px]
+     *                                  [cell-run-btn absolute right:8px]
+     *         [cell-del-btn: absolute, right:-28px]  cell 右外側
+     */
+    #notebook {
+      max-width: 960px; margin: 0 auto;
+      padding: 0 40px 0 80px;   /* 左 80px 給 counter, 右 40px 留呼吸空間 */
+    }
+
+    /* ── CELL ──────────────────────────────────────── */
+    .cell {
+      position: relative; margin-bottom: 10px;
+      border-radius: 8px; border: 1px solid transparent; transition: border-color 0.15s;
+    }
+    .cell.focused { border-color: var(--accent); }
+    .cell.running { border-color: var(--green); }
+
+    /* 執行計數器：絕對定位在 cell 左外側 */
+    .cell-counter {
+      position: absolute;
+      left: -72px;          /* 與 notebook padding-left:80px 配合，留 8px gap */
+      top: 0;
+      width: 64px;
+      text-align: right;
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      font-size: 12px; color: var(--muted);
+      padding-top: 13px;    /* 垂直對齊第一行文字 */
+      user-select: none;
+    }
+    .cell-counter.active { color: var(--accent); }
+    .cell-counter.done   { color: var(--cyan); }
+    .cell-counter.err    { color: var(--red); }
+
+    /* input area */
+    .cell-input {
+      display: flex; background: var(--cell-bg);
+      border-radius: 8px;
+      /* 不設 overflow:hidden，讓 del-btn 可以超出右側 */
+    }
+    .cell.has-output .cell-input { border-radius: 8px 8px 0 0; }
+
+    /* 行號欄：固定寬度，右側 border 分隔 */
+    .cell-lineno {
+      padding: 12px 10px 12px 12px;
+      min-width: 42px;
+      text-align: right;
+      color: var(--muted);
+      border-right: 1px solid var(--border);
+      font-family: 'Cascadia Code', 'Fira Code', monospace;
+      font-size: 12px; line-height: 20px;
+      user-select: none; flex-shrink: 0;
+      border-radius: 8px 0 0 8px;   /* 左側圓角跟隨 cell */
+    }
+    .cell.has-output .cell-lineno { border-radius: 8px 0 0 0; }
+
+    .cell-editor-wrap { flex: 1; position: relative; min-width: 0; }
+
+    .cell-editor {
+      display: block; width: 100%;
+      padding: 12px 44px 12px 14px;   /* 右側 44px 給 run-btn */
+      background: transparent; border: none; outline: none; resize: none;
+      color: var(--text); caret-color: var(--accent);
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: 13.5px; line-height: 20px;
+      overflow: hidden; min-height: 44px;
+    }
+    .cell-editor:disabled { opacity: 0.45; }
+
+    /* ▶ Run 按鈕：hover 才顯示，固定在右上角 */
+    .cell-run-btn {
+      position: absolute; right: 8px; top: 8px;
+      width: 26px; height: 26px;
+      background: var(--accent); color: #1e1e2e;
+      border: none; border-radius: 5px; cursor: pointer; font-size: 11px;
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 0.15s; flex-shrink: 0;
+    }
+    .cell:hover .cell-run-btn,
+    .cell.focused .cell-run-btn { opacity: 1; }
+    .cell-run-btn:disabled { opacity: 0 !important; }
+
+    /* × 刪除按鈕：在 cell 右外側，hover 才顯示 */
+    .cell-del-btn {
+      position: absolute; right: -28px; top: 8px;
+      width: 20px; height: 20px;
+      background: transparent; border: 1px solid var(--border);
+      color: var(--muted); border-radius: 4px; cursor: pointer; font-size: 11px;
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 0.15s;
+    }
+    .cell:hover .cell-del-btn { opacity: 0.5; }
+    .cell-del-btn:hover { opacity: 1 !important; color: var(--red); border-color: var(--red); }
+
+    /* output area */
+    .cell-output {
+      display: none;
+      background: var(--out-bg);
+      border-top: 1px solid var(--border);
+      border-radius: 0 0 8px 8px;
+      padding: 10px 16px 10px 56px;
+      font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+      font-size: 13px; line-height: 1.65;
+    }
+    .cell.has-output .cell-output { display: block; }
+
+    .out-stdout { color: var(--text); white-space: pre-wrap; word-break: break-word; }
+    .out-stderr { color: var(--yellow); white-space: pre-wrap; word-break: break-word; }
+    .out-result { color: var(--cyan); white-space: pre-wrap; word-break: break-word; }
+    .out-result::before { content: "\2190  "; color: var(--muted); }
+    .out-error {
+      color: var(--red); white-space: pre-wrap; word-break: break-word;
+      background: rgba(255,85,85,0.07); border-left: 3px solid var(--red);
+      padding: 5px 10px; border-radius: 0 4px 4px 0; margin: 3px 0; font-size: 12.5px;
+    }
+    .out-figure { margin: 6px 0; }
+    .out-figure img {
+      max-width: 100%; border-radius: 4px;
+      border: 1px solid var(--border); background: white; display: block;
+    }
+
+    /* add cell button */
+    .add-cell-row {
+      max-width: 960px; margin: 6px auto; padding: 0 40px 0 80px;
+    }
+    .add-cell-btn {
+      width: 100%; padding: 7px;
+      background: transparent; border: 1px dashed var(--border);
+      border-radius: 7px; color: var(--muted); font-size: 12px;
+      cursor: pointer; transition: all 0.15s;
+    }
+    .add-cell-btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(189,147,249,0.05); }
+
+    /* ── LOADING OVERLAY ───────────────────────────── */
+    #overlay {
+      position: fixed; inset: 0; background: rgba(30,30,46,0.93);
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 16px; z-index: 999;
+    }
+    #overlay.hidden { display: none; }
+    .spinner {
+      width: 38px; height: 38px;
+      border: 3px solid var(--border); border-top-color: var(--accent);
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .load-title { color: var(--accent); font-size: 15px; }
+    .load-sub   { color: var(--muted); font-size: 12px; text-align: center; }
+    #load-bar-wrap { width: 280px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
+    #load-bar { height: 100%; width: 0%; background: var(--accent); transition: width 0.4s; border-radius: 2px; }
+  </style>
+</head>
+<body>
+
+<div id="overlay">
+  <div class="spinner"></div>
+  <div class="load-title">&#x1F40D; Initializing Pyodide...</div>
+  <div id="load-bar-wrap"><div id="load-bar"></div></div>
+  <div class="load-sub" id="load-msg">Loading Python WASM runtime from local files...</div>
+</div>
+
+<div id="topbar">
+  <span class="logo">&#x1F40D;</span>
+  <h1>Pyodide Console</h1>
+  <span class="credit">Made with &#x2764; by 乙仔</span>
+  <span class="sep">|</span>
+  <div class="spacer"></div>
+  <button class="tb-btn primary" id="btn-run-all" disabled>&#x25B6;&#x25B6; Run All</button>
+  <button class="tb-btn" id="btn-add" disabled>&#xFF0B; Add Cell</button>
+  <button class="tb-btn danger" id="btn-clear" disabled>&#x2715; Clear Outputs</button>
+  <button class="tb-btn" id="btn-restart" disabled>&#x21BA; Restart</button>
+  <span id="status-badge" class="loading">Loading...</span>
+</div>
+
+<div id="notebook-wrap">
+  <div id="notebook"></div>
+  <div class="add-cell-row">
+    <button class="add-cell-btn" id="global-add">&#xFF0B; Add Cell</button>
+  </div>
+</div>
+
+<script>
+// ── globals ──────────────────────────────────────────────────────────────────
+let pyodide   = null;
+let execCount = 0;
+let running   = false;
+let cells     = [];
+let cellId    = 0;
+
+const $nb       = document.getElementById('notebook');
+const $overlay  = document.getElementById('overlay');
+const $loadMsg  = document.getElementById('load-msg');
+const $loadBar  = document.getElementById('load-bar');
+const $badge    = document.getElementById('status-badge');
+
+// ── cell creation ─────────────────────────────────────────────────────────────
+function makeCell(code = '', afterIdx = null) {
+  const id  = ++cellId;
+  const cel = document.createElement('div');
+  cel.className = 'cell'; cel.dataset.cellId = id;
+
+  // left counter
+  const counter = document.createElement('div');
+  counter.className = 'cell-counter';
+  counter.textContent = '[ ]';
+  cel.appendChild(counter);
+
+  // delete button
+  const delBtn = document.createElement('button');
+  delBtn.className = 'cell-del-btn';
+  delBtn.title = 'Delete cell';
+  delBtn.textContent = '\u00D7';
+  cel.appendChild(delBtn);
+
+  // input row
+  const inputRow = document.createElement('div');
+  inputRow.className = 'cell-input';
+
+  const linenoEl = document.createElement('div');
+  linenoEl.className = 'cell-lineno';
+  linenoEl.textContent = '1';
+
+  const editorWrap = document.createElement('div');
+  editorWrap.className = 'cell-editor-wrap';
+
+  const editor = document.createElement('textarea');
+  editor.className = 'cell-editor';
+  editor.value = code;
+  editor.spellcheck = false;
+
+  const runBtn = document.createElement('button');
+  runBtn.className = 'cell-run-btn';
+  runBtn.title = 'Run (Shift+Enter)';
+  runBtn.innerHTML = '&#x25B6;';
+
+  editorWrap.appendChild(editor);
+  editorWrap.appendChild(runBtn);
+  inputRow.appendChild(linenoEl);
+  inputRow.appendChild(editorWrap);
+  cel.appendChild(inputRow);
+
+  // output
+  const outEl = document.createElement('div');
+  outEl.className = 'cell-output';
+  cel.appendChild(outEl);
+
+  // ── auto-resize + line numbers ──
+  function resize() {
+    editor.style.height = 'auto';
+    editor.style.height = editor.scrollHeight + 'px';
+    const n = editor.value.split('\n').length;
+    linenoEl.textContent = Array.from({length: n}, (_, i) => i + 1).join('\n');
+  }
+  editor.addEventListener('input', resize);
+  requestAnimationFrame(resize);
+
+  // ── focus styling ──
+  editor.addEventListener('focus', () => cel.classList.add('focused'));
+  editor.addEventListener('blur',  () => cel.classList.remove('focused'));
+
+  // ── keyboard ──
+  editor.addEventListener('keydown', e => {
+    if ((e.shiftKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault(); runCell(obj); return;
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const s = editor.selectionStart, en = editor.selectionEnd;
+      if (!e.shiftKey) {
+        const ins = '    ';
+        editor.value = editor.value.slice(0, s) + ins + editor.value.slice(en);
+        editor.selectionStart = editor.selectionEnd = s + 4;
+      } else {
+        const ls = editor.value.lastIndexOf('\n', s - 1) + 1;
+        if (editor.value.slice(ls, ls + 4) === '    ') {
+          editor.value = editor.value.slice(0, ls) + editor.value.slice(ls + 4);
+          editor.selectionStart = editor.selectionEnd = Math.max(ls, s - 4);
+        }
+      }
+      resize();
+    }
+  });
+
+  runBtn.addEventListener('click', () => runCell(obj));
+  delBtn.addEventListener('click', () => deleteCell(obj));
+
+  // ── insert into DOM ──
+  let insertIdx = cells.length;
+  if (afterIdx !== null && afterIdx >= 0 && afterIdx < cells.length) {
+    cells[afterIdx].cel.parentNode.insertBefore(cel, cells[afterIdx].cel.nextSibling);
+    insertIdx = afterIdx + 1;
+    cells.splice(insertIdx, 0, null); // placeholder
+  } else {
+    $nb.appendChild(cel);
+  }
+
+  const obj = { id, cel, editor, outEl, counter, runBtn, delBtn, linenoEl };
+
+  if (afterIdx !== null && afterIdx >= 0 && afterIdx < cells.length - 1) {
+    cells[insertIdx] = obj;
+  } else {
+    cells[insertIdx] = obj;
+    if (cells[cells.length - 1] === null) cells.pop();
+  }
+
+  editor.focus();
+  return obj;
+}
+
+function deleteCell(obj) {
+  if (cells.length <= 1) return; // keep at least one
+  const idx = cells.findIndex(c => c.id === obj.id);
+  if (idx === -1) return;
+  obj.cel.remove();
+  cells.splice(idx, 1);
+  if (cells.length > 0) cells[Math.min(idx, cells.length - 1)].editor.focus();
+}
+
+// ── output helpers ────────────────────────────────────────────────────────────
+function clearOut(obj) {
+  obj.outEl.innerHTML = '';
+  obj.cel.classList.remove('has-output');
+  obj.counter.textContent = '[ ]';
+  obj.counter.className = 'cell-counter';
+}
+
+function addOut(obj, content, cls) {
+  obj.cel.classList.add('has-output');
+  const d = document.createElement('div');
+  d.className = cls;
+  if (content instanceof HTMLElement) d.appendChild(content);
+  else d.textContent = String(content);
+  obj.outEl.appendChild(d);
+}
+
+// ── run single cell ───────────────────────────────────────────────────────────
+async function runCell(obj) {
+  if (!pyodide || running) return;
+  const code = obj.editor.value.trim();
+  if (!code) return;
+
+  running = true;
+  clearOut(obj);
+  obj.cel.classList.add('running');
+  obj.counter.textContent = '[*]';
+  obj.counter.className = 'cell-counter active';
+  obj.runBtn.disabled = true;
+  document.getElementById('btn-run-all').disabled = true;
+  setBadge('running', 'Running...');
+
+  try {
+    // capture stdout/stderr
+    pyodide.runPython(`
+import sys, io as _io
+_co = _io.StringIO(); _ce = _io.StringIO()
+_oo, _oe = sys.stdout, sys.stderr
+sys.stdout = _co; sys.stderr = _ce
+`);
+
+    // patch matplotlib.pyplot.show → base64 PNG
+    pyodide.runPython(`
+_figs = []
+try:
+    import matplotlib, matplotlib.pyplot as _plt
+    matplotlib.use('Agg')
+    def _show(*a,**k):
+        import io as _bi, base64 as _b
+        b=_bi.BytesIO(); _plt.savefig(b,format='png',bbox_inches='tight',dpi=130)
+        b.seek(0); _figs.append(_b.b64encode(b.read()).decode()); _plt.close('all')
+    _plt.show = _show
+except: pass
+`);
+
+    // ── 自動偵測 import 並載入缺少的 Pyodide 套件 ──
+    const importedMods = [];
+    for (const m of code.matchAll(/^\s*(?:import|from)\s+([a-zA-Z_][a-zA-Z0-9_]*)/gm)) {
+      importedMods.push(m[1]);
+    }
+    if (importedMods.length > 0) {
+      addOut(obj, `Checking packages: ${importedMods.join(', ')} ...`, 'out-stdout');
+      try {
+        await pyodide.loadPackagesFromImports(code);
+      } catch(pkgErr) {
+        // loadPackagesFromImports 失敗不中止，繼續嘗試執行
+      }
+      // 清除剛才的「Checking」訊息
+      const checking = obj.outEl.lastChild;
+      if (checking && checking.textContent.startsWith('Checking packages:')) {
+        obj.outEl.removeChild(checking);
+        if (obj.outEl.children.length === 0) obj.cel.classList.remove('has-output');
+      }
+    }
+
+    let result; let threw = false;
+    try { result = await pyodide.runPythonAsync(code); }
+    catch(e) { threw = true; addOut(obj, e.message || String(e), 'out-error'); }
+
+    pyodide.runPython('sys.stdout=_oo; sys.stderr=_oe');
+    const stdout = pyodide.runPython('_co.getvalue()');
+    const stderr = pyodide.runPython('_ce.getvalue()');
+
+    if (stdout) addOut(obj, stdout.replace(/\n$/, ''), 'out-stdout');
+    if (stderr) addOut(obj, stderr.replace(/\n$/, ''), 'out-stderr');
+
+    // matplotlib figures
+    const figs = pyodide.runPython('_figs');
+    const arr  = figs && figs.toJs ? figs.toJs() : (Array.isArray(figs) ? figs : []);
+    for (const b64 of arr) {
+      const wrap = document.createElement('div');
+      wrap.className = 'out-figure';
+      const img = document.createElement('img');
+      img.src = 'data:image/png;base64,' + b64;
+      wrap.appendChild(img);
+      obj.cel.classList.add('has-output');
+      obj.outEl.appendChild(wrap);
+    }
+
+    // repr of result
+    if (!threw && result !== undefined && result !== null) {
+      try { const r = pyodide.runPython('repr(_)'); if (r !== 'None') addOut(obj, r, 'out-result'); }
+      catch(_) {}
+    }
+
+    execCount++;
+    obj.counter.textContent = `[${execCount}]`;
+    obj.counter.className   = threw ? 'cell-counter err' : 'cell-counter done';
+
+  } catch(e) {
+    addOut(obj, String(e), 'out-error');
+    obj.counter.textContent = '[!]'; obj.counter.className = 'cell-counter err';
+  } finally {
+    obj.cel.classList.remove('running');
+    obj.runBtn.disabled = false;
+    document.getElementById('btn-run-all').disabled = false;
+    running = false;
+    setBadge('ready', 'Ready');
+    obj.outEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+}
+
+async function runAll() {
+  for (const c of [...cells]) {
+    if (c.editor.value.trim()) {
+      await runCell(c);
+      await new Promise(r => { const t = setInterval(() => { if (!running) { clearInterval(t); r(); } }, 30); });
+    }
+  }
+}
+
+function setBadge(cls, txt) { $badge.className = cls; $badge.textContent = txt; }
+
+function enableUI() {
+  ['btn-run-all','btn-add','btn-clear','btn-restart'].forEach(id => {
+    document.getElementById(id).disabled = false;
+  });
+  cells.forEach(c => { c.editor.disabled = false; c.runBtn.disabled = false; });
+}
+
+function addCellAtEnd() { makeCell('', cells.length - 1); }
+
+// ── Pyodide init ──────────────────────────────────────────────────────────────
+(async () => {
+  $loadBar.style.width = '10%';
+
+  // initial cells
+  makeCell([
+    'import sys',
+    'print(f"Python {sys.version}")',
+    'print("Pyodide Console \u2014 fully offline \u2714")'
+  ].join('\n'));
+
+  makeCell([
+    '# numpy + matplotlib demo',
+    'import numpy as np',
+    'import matplotlib.pyplot as plt',
+    '',
+    'x = np.linspace(0, 2 * np.pi, 300)',
+    'fig, axes = plt.subplots(1, 2, figsize=(9, 3))',
+    'axes[0].plot(x, np.sin(x), color="#bd93f9")',
+    'axes[0].set_title("sin(x)")',
+    'axes[1].plot(x, np.cos(x), color="#50fa7b")',
+    'axes[1].set_title("cos(x)")',
+    'plt.tight_layout()',
+    'plt.show()'
+  ].join('\n'));
+
+  makeCell('');
+  cells.forEach(c => c.editor.disabled = true);
+
+  try {
+    $loadMsg.textContent = 'Loading Python WASM...';
+    $loadBar.style.width = '25%';
+
+    pyodide = await loadPyodide({ indexURL: './', stdout: ()=>{}, stderr: ()=>{} });
+
+    $loadBar.style.width = '75%';
+    $loadMsg.textContent = 'Loading micropip...';
+    await pyodide.loadPackage('micropip').catch(() => {});
+
+    $loadBar.style.width = '100%';
+    $loadMsg.textContent = 'Ready!';
+    await new Promise(r => setTimeout(r, 150));
+
+    $overlay.classList.add('hidden');
+    setBadge('ready', 'Ready');
+    enableUI();
+    cells[0].editor.focus();
+
+  } catch(e) {
+    $overlay.classList.add('hidden');
+    setBadge('error', 'Error');
+    if (cells[0]) addOut(cells[0], 'Failed to load Pyodide:\n' + (e.message || e), 'out-error');
+  }
+})();
+
+// ── toolbar ───────────────────────────────────────────────────────────────────
+document.getElementById('btn-run-all').addEventListener('click', runAll);
+document.getElementById('btn-add').addEventListener('click', addCellAtEnd);
+document.getElementById('global-add').addEventListener('click', addCellAtEnd);
+document.getElementById('btn-clear').addEventListener('click', () => {
+  cells.forEach(clearOut); execCount = 0;
+});
+document.getElementById('btn-restart').addEventListener('click', async () => {
+  if (!confirm('Restart kernel? All variables will be cleared.')) return;
+  setBadge('loading', 'Restarting...');
+  cells.forEach(c => { c.editor.disabled = true; c.runBtn.disabled = true; });
+  ['btn-run-all','btn-add','btn-clear','btn-restart'].forEach(id =>
+    document.getElementById(id).disabled = true);
+  try {
+    pyodide = await loadPyodide({ indexURL: './', stdout:()=>{}, stderr:()=>{} });
+    await pyodide.loadPackage('micropip').catch(()=>{});
+    execCount = 0; cells.forEach(clearOut);
+    setBadge('ready', 'Ready'); enableUI();
+  } catch(e) { setBadge('error', 'Restart failed'); }
+});
+</script>
+</body>
+</html>
