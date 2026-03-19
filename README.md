@@ -239,8 +239,8 @@ SOFTWARE.
 
 #### 聯繫方式
 
-- Email：your@email.com
-- 網站：https://your-website.com
+- X：[@Yizai_Wu](https://x.com/Yizai_Wu)
+- Threads：[@yizaiwu](https://www.threads.com/@yizaiwu)
 
 ---
 
